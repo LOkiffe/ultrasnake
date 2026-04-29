@@ -43,6 +43,11 @@ SIDEBAR_W = 200                         # Largeur du panneau latéral
 FPS = 60                                # Images par seconde
 SAVE_FILE = "snake_save.json"           # Fichier de sauvegarde
 
+# ─── INTERPOLATION FLUIDE ─────────────────────────────────────────────────────
+# Le serpent se déplace case par case logiquement, mais visuellement
+# on interpole sa position pixel par pixel entre l'ancienne et la nouvelle case.
+# t_interp va de 0.0 à 1.0 sur chaque intervalle de déplacement.
+
 # ─── COULEURS ─────────────────────────────────────────────────────────────────
 BLACK       = (0,   0,   0)
 WHITE       = (255, 255, 255)
@@ -458,6 +463,16 @@ class Snake:
         self.next_dir = (1, 0)        # Prochaine direction (évite les inversions)
         self.grew = False             # Flag: le serpent a-t-il grandi ce tour?
         self.alive = True
+
+        # ── INTERPOLATION FLUIDE ──────────────────────────────────────────────
+        # prev_body = positions des segments AVANT le dernier déplacement logique
+        # t_interp  = progression 0.0->1.0 entre prev_body et body
+        # Chaque frame, t_interp avance de (1 / interval) pour arriver à 1.0
+        # exactement au moment du prochain déplacement logique.
+        # Le dessin calcule la position pixel = lerp(prev, curr, t_interp)
+        self.prev_body = list(self.body)   # Sauvegarde des positions précédentes
+        self.t_interp  = 1.0              # Commence à 1.0 (pas d'animation initiale)
+
         # Animation
         self.head_angle = 0           # Angle de rotation visuelle de la tête
         self.eye_blink = 0            # Compteur de clignement des yeux
@@ -475,6 +490,11 @@ class Snake:
 
     def move(self):
         """Déplace le serpent d'une case dans la direction courante."""
+        # Sauvegarde les positions actuelles AVANT de bouger
+        # pour que l'interpolation parte de là
+        self.prev_body = list(self.body)
+        self.t_interp  = 0.0   # Repart de 0 : début de la transition
+
         self.direction = self.next_dir
         head_x, head_y = self.body[0]
         new_head = (head_x + self.direction[0], head_y + self.direction[1])
@@ -483,6 +503,12 @@ class Snake:
             self.body.pop()
         else:
             self.grew = False
+        
+        # Aligne prev_body sur la même longueur que body
+        while len(self.prev_body) < len(self.body):
+            self.prev_body.append(self.prev_body[-1])
+        while len(self.prev_body) > len(self.body):
+            self.prev_body.pop()
 
     def grow(self):
         """Fait grandir le serpent d'un segment."""
@@ -531,16 +557,33 @@ class Snake:
         h = tuple(int(skin['head'][i] * (1 - ratio * 0.5) + skin['body'][i] * ratio * 0.5) for i in range(3))
         return h
 
+    def get_interp_pos(self, i):
+        """Retourne la position pixel interpolée du segment i.
+        Interpole linéairement entre prev_body[i] et body[i] selon t_interp.
+        Cela donne un glissement fluide entre chaque case."""
+        t = self.t_interp
+        # Easing : accélération douce avec smoothstep (t*t*(3-2t))
+        t = t * t * (3 - 2 * t)
+        if i < len(self.prev_body):
+            px, py = self.prev_body[i]
+        else:
+            px, py = self.body[i]
+        cx, cy = self.body[i]
+        ix = px + (cx - px) * t
+        iy = py + (cy - py) * t
+        return ix * GRID_SIZE, iy * GRID_SIZE
+
     def draw(self, surface, skin, particles):
         """Dessine le serpent complet avec tous les effets visuels."""
         glow_color = skin['glow']
 
         # ── Dessiner de la queue vers la tête (tête au-dessus)
         for i in range(len(self.body) - 1, -1, -1):
-            seg = self.body[i]
-            x = seg[0] * GRID_SIZE
-            y = seg[1] * GRID_SIZE
+            # ── Position interpolée (fluide) au lieu de la position logique brute
+            x, y = self.get_interp_pos(i)
+            x, y = int(x), int(y)
             color = self.get_segment_color(i, skin)
+            seg = self.body[i]  # Gardé pour compatibilité (collisions etc.)
 
             # Effet d'invincibilité (clignotement + halo)
             if self.invincible > 0 and (self.invincible // 5) % 2 == 0:
@@ -1296,6 +1339,12 @@ class GameState:
         # Timer de déplacement
         self.move_timer += 1
         interval = self.snake.get_move_interval(self.get_base_interval())
+
+        # ── Avance l'interpolation fluide chaque frame ───────────────────────
+        # t_interp passe de 0.0 à 1.0 sur exactement "interval" frames,
+        # synchronisé avec le déplacement logique pour un glissement parfait.
+        if interval > 0:
+            self.snake.t_interp = min(1.0, self.snake.t_interp + 1.0 / interval)
 
         if self.move_timer >= interval:
             self.move_timer = 0
